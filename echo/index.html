@@ -29,9 +29,13 @@
 </head>
 <body>
 <div class="wrap">
+  <div class="hud">
+    <div class="row">回声 <div class="bar"><i id="cd"></i></div></div>
+  </div>
   <canvas id="c" width="588" height="420"></canvas>
   <div class="tips">
     <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>/方向键 移动</span>
+    <span><kbd>空格</kbd> 发出回声（会暴露你）</span>
     <span><kbd>R</kbd> 重开</span>
   </div>
 </div>
@@ -40,11 +44,14 @@
   const COLS = 21, ROWS = 15, CELL = 28, RADIUS = 9;
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
+  const cdEl = document.getElementById('cd');
 
   const idx = (x, y) => y * COLS + x;
   const inside = (x, y) => x > 0 && y > 0 && x < COLS - 1 && y < ROWS - 1;
 
   let maze, player, lastMove;
+  let seen, lastPing, pingT, pingAt;
+  const COOLDOWN = 1800, PING_R = 9, FADE = 2600;
 
   // ---------- 迷宫（递归回溯） ----------
   function genMaze() {
@@ -80,13 +87,67 @@
     return m;
   }
 
+  function bfsDist(sx, sy, blocked) {
+    const dist = new Int16Array(COLS * ROWS).fill(-1);
+    const q = [[sx, sy]];
+    dist[idx(sx, sy)] = 0;
+    while (q.length) {
+      const [x, y] = q.shift();
+      const d = dist[idx(x, y)];
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+        if (maze[idx(nx, ny)] !== 0) continue;
+        if (dist[idx(nx, ny)] !== -1) continue;
+        dist[idx(nx, ny)] = d + 1;
+        q.push([nx, ny]);
+      }
+    }
+    return dist;
+  }
+
   // ---------- 初始化 ----------
   function reset() {
     maze = genMaze();
+    seen = new Float32Array(COLS * ROWS);
     player = {x: 1, y: 1};
+    pingT = -9999;
+    pingAt = {x: 1, y: 1};
+    lastPing = -9999;
     lastMove = 0;
+    reveal(player.x, player.y, 3.2);
     draw();
   }
+
+  // ---------- 感知 ----------
+  function reveal(sx, sy, radius) {
+    const now = performance.now();
+    const dist = bfsDist(sx, sy);
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        const d = dist[idx(x, y)];
+        if (d >= 0 && d <= radius) {
+          seen[idx(x, y)] = now;
+          for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+            if (maze[idx(nx, ny)] === 1) seen[idx(nx, ny)] = now;
+          }
+        }
+      }
+    }
+  }
+
+  function doPing() {
+    const now = performance.now();
+    if (now - lastPing < COOLDOWN) return;
+    lastPing = now;
+    pingT = now;
+    pingAt = {x: player.x, y: player.y};
+    reveal(player.x, player.y, PING_R);
+    draw();
+  }
+
   // ---------- 玩家 ----------
   function tryMove(dx, dy) {
     const now = performance.now();
@@ -96,10 +157,18 @@
     if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) return;
     if (maze[idx(nx, ny)] !== 0) return;
     player.x = nx; player.y = ny;
+    reveal(nx, ny, 2.2);
     draw();
   }
 
   // ---------- 渲染 ----------
+  function alphaOf(i, now) {
+    const t = seen[i];
+    if (!t) return 0;
+    const a = 1 - (now - t) / FADE;
+    return a > 0 ? a : 0;
+  }
+
   function draw() {
     const now = performance.now();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -108,7 +177,8 @@
 
     for (let y = 0; y < ROWS; y++) {
       for (let x = 0; x < COLS; x++) {
-        const a = 1;
+        const a = alphaOf(idx(x, y), now);
+        if (a <= 0) continue;
         const px = x * CELL, py = y * CELL;
         if (maze[idx(x, y)] === 1) {
           ctx.globalAlpha = a * 0.95;
@@ -135,6 +205,29 @@
       ctx.shadowBlur = 0;
     }
 
+    // 回声波纹
+    const age = now - pingT;
+    if (age >= 0 && age < 900) {
+      const r = (age / 900) * PING_R * CELL;
+      ctx.globalAlpha = (1 - age / 900) * 0.5;
+      ctx.strokeStyle = '#4de2ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(pingAt.x*CELL + CELL/2, pingAt.y*CELL + CELL/2, r, 0, Math.PI*2); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+  }
+
+  // ---------- 主循环 ----------
+  function frame() {
+    const now = performance.now();
+    draw();
+
+    const cd = Math.min(1, (now - lastPing) / COOLDOWN);
+    cdEl.style.width = (cd * 100).toFixed(0) + '%';
+    cdEl.style.background = cd >= 1 ? '#4de2ff' : '#33506b';
+
+    requestAnimationFrame(frame);
   }
 
   // ---------- 输入 ----------
@@ -144,12 +237,14 @@
     W:[0,-1], S:[0,1], A:[-1,0], D:[1,0]
   };
   window.addEventListener('keydown', (e) => {
+    if (e.key === ' ') { e.preventDefault(); doPing(); return; }
     if (e.key === 'r' || e.key === 'R') { reset(); return; }
     const m = map[e.key];
     if (m) { e.preventDefault(); tryMove(m[0], m[1]); }
   });
 
   reset();
+  requestAnimationFrame(frame);
 })();
 </script>
 </body>
