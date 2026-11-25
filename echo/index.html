@@ -17,6 +17,7 @@
     display:flex; align-items:center; justify-content:center; user-select:none;
   }
   .wrap{padding:18px}
+  .goal{margin:0 0 12px;font-size:15px;color:var(--text)}
   .hud{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:14px;color:var(--dim)}
   .hud b{color:var(--text)}
   .bar{width:110px;height:6px;border-radius:3px;background:#16202e;overflow:hidden;margin-left:8px}
@@ -29,6 +30,7 @@
 </head>
 <body>
 <div class="wrap">
+  <p class="goal">收集 3 枚蓝色碎片，从绿色出口离开。</p>
   <div class="hud">
     <span>碎片 <b id="frag">0</b>/3</span>
     <div class="row">回声 <div class="bar"><i id="cd"></i></div></div>
@@ -36,7 +38,7 @@
   <canvas id="c" width="588" height="420"></canvas>
   <div class="tips">
     <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>/方向键 移动</span>
-    <span><kbd>空格</kbd> 发出回声（会暴露你）</span>
+    <span><kbd>空格</kbd> 发出回声（会引来听者）</span>
     <span><kbd>R</kbd> 重开</span>
   </div>
 </div>
@@ -53,7 +55,7 @@
   const directions = [[1,0],[-1,0],[0,1],[0,-1]];
 
   let maze, seen, player, enemies, frags, exitCell, collected;
-  let state, wave, echoLit, lastPing, lastMove, audio;
+  let state, wave, echoLit, lastPing, lastMove, audio, openingTime;
 
   const COOLDOWN = 1800, ENEMY_STEP = 320, PING_R = 9, FADE = 2600;
   const WAVE_STEP = 90;
@@ -133,10 +135,42 @@
   }
 
   // ---------- 初始化 ----------
-  function reset() {
+  const openingMap = [
+    '#####################',
+    '#######....*.####*.##',
+    '#######.####.#####.##',
+    '##......####.#.....##',
+    '##.######....#.###.##',
+    '##.######.####.###.##',
+    '##.######.####.###.##',
+    '##....P.....L..###.##',
+    '######.#######.#...##',
+    '###.*..##......#.####',
+    '###.#####.####.#.##.#',
+    '###.#####.####.#.##.#',
+    '###.......####...##.#',
+    '################...E#',
+    '#####################',
+  ];
+
+  function setupOpening() {
+    maze = new Uint8Array(COLS * ROWS);
+    frags = [];
+    enemies = [];
+    openingMap.forEach((row, y) => {
+      for (let x = 0; x < row.length; x++) {
+        const tile = row[x];
+        maze[idx(x, y)] = tile === '#' ? 1 : 0;
+        if (tile === 'P') player = {x, y};
+        if (tile === 'E') exitCell = {x, y};
+        if (tile === '*') frags.push({x, y, got: false});
+        if (tile === 'L') enemies.push({x, y, target: null, next: 0, waitingForSound: true});
+      }
+    });
+  }
+
+  function setupRandomMaze() {
     maze = genMaze();
-    seen = new Float64Array(COLS * ROWS).fill(-Infinity);
-    echoLit = new Float64Array(COLS * ROWS).fill(-Infinity);
     player = {x: 1, y: 1};
     exitCell = {x: COLS - 2, y: ROWS - 2};
 
@@ -156,6 +190,13 @@
       .sort(() => Math.random() - 0.5)
       .slice(0, 2);
     enemies = far.map(c => ({x: c.x, y: c.y, target: null, next: 0}));
+  }
+
+  function reset(opening = false) {
+    if (opening) setupOpening();
+    else setupRandomMaze();
+    seen = new Float64Array(COLS * ROWS).fill(-Infinity);
+    echoLit = new Float64Array(COLS * ROWS).fill(-Infinity);
 
     collected = 0;
     state = 'play';
@@ -164,6 +205,7 @@
     lastMove = -Infinity;
     fragEl.textContent = '0';
     reveal(player.x, player.y, 3.2);
+    openingTime = opening ? performance.now() : null;
     draw();
   }
 
@@ -227,6 +269,7 @@
   function doPing() {
     const now = performance.now();
     if (now - lastPing < COOLDOWN) return;
+    leaveOpening();
     lastPing = now;
     advanceWave(now);
     const dist = bfsDist(player.x, player.y);
@@ -246,6 +289,12 @@
   }
 
   // ---------- 玩家 ----------
+  function leaveOpening() {
+    if (openingTime === null) return;
+    reveal(player.x, player.y, 3.2);
+    openingTime = null;
+  }
+
   function caught() {
     if (!enemies.some(e => e.x === player.x && e.y === player.y)) return false;
     state = 'lose';
@@ -260,6 +309,7 @@
     const nx = player.x + dx, ny = player.y + dy;
     if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) return;
     if (maze[idx(nx, ny)] !== 0) return;
+    leaveOpening();
     player.x = nx; player.y = ny;
     if (caught()) {
       draw();
@@ -285,8 +335,12 @@
       if (e.sound && now >= e.sound.at) {
         e.target = {x: e.sound.x, y: e.sound.y};
         e.sound = null;
+        if (e.waitingForSound) {
+          e.waitingForSound = false;
+          e.next = now + ENEMY_STEP;
+        }
       }
-      if (now < e.next) continue;
+      if (e.waitingForSound || now < e.next) continue;
       e.next = now + ENEMY_STEP;
       let tx = e.target ? e.target.x : null, ty = e.target ? e.target.y : null;
       if (tx === null) {
@@ -295,9 +349,11 @@
         if (d <= 4) { tx = player.x; ty = player.y; }
       }
       let nx = e.x, ny = e.y;
-      if (tx !== null && (tx !== e.x || ty !== e.y)) {
-        const st = pathStep(e.x, e.y, tx, ty);
-        if (st) { nx = st[0]; ny = st[1]; }
+      if (tx !== null) {
+        if (tx !== e.x || ty !== e.y) {
+          const st = pathStep(e.x, e.y, tx, ty);
+          if (st) { nx = st[0]; ny = st[1]; }
+        }
       } else {
         const opts = [[1,0],[-1,0],[0,1],[0,-1]].filter(([dx, dy]) =>
           maze[idx(e.x + dx, e.y + dy)] === 0);
@@ -318,7 +374,7 @@
   // ---------- 渲染 ----------
   function alphaOf(i, now) {
     const t = seen[i];
-    const a = 1 - (now - t) / FADE;
+    const a = 1 - ((openingTime ?? now) - t) / FADE;
     return a > 0 ? a : 0;
   }
 
@@ -449,7 +505,7 @@
     if (m) { e.preventDefault(); tryMove(m[0], m[1]); }
   });
 
-  reset();
+  reset(true);
   requestAnimationFrame(frame);
 })();
 </script>
