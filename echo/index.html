@@ -50,11 +50,12 @@
 
   const idx = (x, y) => y * COLS + x;
   const inside = (x, y) => x > 0 && y > 0 && x < COLS - 1 && y < ROWS - 1;
+  const key = (x, y) => x + ',' + y;
 
-  let maze, player, lastMove;
-  let seen, lastPing, pingT, pingAt;
-  const COOLDOWN = 1800, PING_R = 9, FADE = 2600;
-  let exitCell, frags, collected, state;
+  let maze, seen, player, enemies, frags, exitCell, collected;
+  let state, pingT, pingAt, lastPing, enemyClock, lastMove, startAt;
+
+  const COOLDOWN = 1800, ENEMY_STEP = 320, PING_R = 9, FADE = 2600;
 
   // ---------- 迷宫（递归回溯） ----------
   function genMaze() {
@@ -117,6 +118,19 @@
     return out;
   }
 
+  function pathStep(sx, sy, tx, ty) {
+    const dist = bfsDist(tx, ty);
+    let best = null, bestD = 1e9;
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nx = sx + dx, ny = sy + dy;
+      if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+      if (maze[idx(nx, ny)] !== 0) continue;
+      const d = dist[idx(nx, ny)];
+      if (d >= 0 && d < bestD) { bestD = d; best = [nx, ny]; }
+    }
+    return best;
+  }
+
   // ---------- 初始化 ----------
   function reset() {
     maze = genMaze();
@@ -135,12 +149,20 @@
       frags.push({x: c.x, y: c.y, got: false});
     }
 
+    const far = openCells()
+      .filter(c => Math.abs(c.x - 1) + Math.abs(c.y - 1) > 10)
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 2);
+    enemies = far.map(c => ({x: c.x, y: c.y, target: null, next: 0}));
+
     collected = 0;
     state = 'play';
     pingT = -9999;
     pingAt = {x: 1, y: 1};
     lastPing = -9999;
+    enemyClock = 0;
     lastMove = 0;
+    startAt = performance.now();
     fragEl.textContent = '0';
     reveal(player.x, player.y, 3.2);
     draw();
@@ -172,6 +194,11 @@
     pingT = now;
     pingAt = {x: player.x, y: player.y};
     reveal(player.x, player.y, PING_R);
+    // 听者被惊动
+    for (const e of enemies) {
+      const d = Math.abs(e.x - player.x) + Math.abs(e.y - player.y);
+      if (d <= PING_R * 2) e.target = {x: player.x, y: player.y};
+    }
     draw();
   }
 
@@ -197,6 +224,35 @@
       state = 'win';
     }
     draw();
+  }
+
+  // ---------- 敌人 ----------
+  function stepEnemies(now) {
+    for (const e of enemies) {
+      if (now < e.next) continue;
+      e.next = now + ENEMY_STEP;
+      let tx = e.target ? e.target.x : null, ty = e.target ? e.target.y : null;
+      if (tx === null) {
+        // 没听到声音：在人附近游荡
+        const d = Math.abs(e.x - player.x) + Math.abs(e.y - player.y);
+        if (d <= 4) { tx = player.x; ty = player.y; }
+      }
+      let nx = e.x, ny = e.y;
+      if (tx !== null && (tx !== e.x || ty !== e.y)) {
+        const st = pathStep(e.x, e.y, tx, ty);
+        if (st) { nx = st[0]; ny = st[1]; }
+      } else {
+        const opts = [[1,0],[-1,0],[0,1],[0,-1]].filter(([dx, dy]) =>
+          maze[idx(e.x + dx, e.y + dy)] === 0);
+        if (opts.length) {
+          const [dx, dy] = opts[Math.floor(Math.random() * opts.length)];
+          nx = e.x + dx; ny = e.y + dy;
+        }
+      }
+      e.x = nx; e.y = ny;
+      if (nx === player.x && ny === player.y) state = 'lose';
+      if (e.target && Math.abs(e.x - e.target.x) + Math.abs(e.y - e.target.y) <= 1) e.target = null;
+    }
   }
 
   // ---------- 渲染 ----------
@@ -262,6 +318,20 @@
       ctx.globalAlpha = 1;
     }
 
+    // 敌人
+    for (const e of enemies) {
+      const a = alphaOf(idx(e.x, e.y), now);
+      if (a <= 0) continue;
+      const cx = e.x*CELL + CELL/2, cy = e.y*CELL + CELL/2;
+      const pulse = 0.7 + 0.3 * Math.sin(now / 180);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#ff4d6d';
+      ctx.shadowColor = '#ff4d6d'; ctx.shadowBlur = 16 * pulse;
+      ctx.beginPath(); ctx.arc(cx, cy, 7 * pulse, 0, Math.PI*2); ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+    }
+
     // 玩家
     {
       const cx = player.x*CELL + CELL/2, cy = player.y*CELL + CELL/2;
@@ -283,6 +353,7 @@
     }
 
     if (state === 'win') overlay('你走了出去', '按 R 再来一次', '#4dffa6');
+    if (state === 'lose') overlay('被听见了', '按 R 再来一次', '#ff4d6d');
   }
 
   function overlay(title, sub, color) {
@@ -300,6 +371,7 @@
   // ---------- 主循环 ----------
   function frame() {
     const now = performance.now();
+    if (state === 'play') stepEnemies(now);
     draw();
 
     const cd = Math.min(1, (now - lastPing) / COOLDOWN);
