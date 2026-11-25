@@ -42,7 +42,7 @@
 </div>
 <script>
 (() => {
-  const COLS = 21, ROWS = 15, CELL = 28, RADIUS = 9;
+  const COLS = 21, ROWS = 15, CELL = 28;
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
   const fragEl = document.getElementById('frag');
@@ -50,12 +50,13 @@
 
   const idx = (x, y) => y * COLS + x;
   const inside = (x, y) => x > 0 && y > 0 && x < COLS - 1 && y < ROWS - 1;
-  const key = (x, y) => x + ',' + y;
+  const directions = [[1,0],[-1,0],[0,1],[0,-1]];
 
   let maze, seen, player, enemies, frags, exitCell, collected;
-  let state, pingT, pingAt, lastPing, enemyClock, lastMove, startAt;
+  let state, wave, echoLit, lastPing, lastMove, audio;
 
   const COOLDOWN = 1800, ENEMY_STEP = 320, PING_R = 9, FADE = 2600;
+  const WAVE_STEP = 90;
 
   // ---------- 迷宫（递归回溯） ----------
   function genMaze() {
@@ -91,7 +92,7 @@
     return m;
   }
 
-  function bfsDist(sx, sy, blocked) {
+  function bfsDist(sx, sy) {
     const dist = new Int16Array(COLS * ROWS).fill(-1);
     const q = [[sx, sy]];
     dist[idx(sx, sy)] = 0;
@@ -134,7 +135,8 @@
   // ---------- 初始化 ----------
   function reset() {
     maze = genMaze();
-    seen = new Float32Array(COLS * ROWS);
+    seen = new Float64Array(COLS * ROWS).fill(-Infinity);
+    echoLit = new Float64Array(COLS * ROWS).fill(-Infinity);
     player = {x: 1, y: 1};
     exitCell = {x: COLS - 2, y: ROWS - 2};
 
@@ -157,33 +159,68 @@
 
     collected = 0;
     state = 'play';
-    pingT = -9999;
-    pingAt = {x: 1, y: 1};
-    lastPing = -9999;
-    enemyClock = 0;
-    lastMove = 0;
-    startAt = performance.now();
+    wave = null;
+    lastPing = -Infinity;
+    lastMove = -Infinity;
     fragEl.textContent = '0';
     reveal(player.x, player.y, 3.2);
     draw();
   }
 
   // ---------- 感知 ----------
+  function lightCell(i, time) {
+    seen[i] = Math.max(seen[i], time);
+    const x = i % COLS, y = Math.floor(i / COLS);
+    for (const [dx, dy] of directions) {
+      const neighbor = idx(x + dx, y + dy);
+      if (maze[neighbor] === 1) seen[neighbor] = Math.max(seen[neighbor], time);
+    }
+  }
+
   function reveal(sx, sy, radius) {
     const now = performance.now();
     const dist = bfsDist(sx, sy);
-    for (let y = 0; y < ROWS; y++) {
-      for (let x = 0; x < COLS; x++) {
-        const d = dist[idx(x, y)];
-        if (d >= 0 && d <= radius) {
-          seen[idx(x, y)] = now;
-          for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-            const nx = x + dx, ny = y + dy;
-            if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
-            if (maze[idx(nx, ny)] === 1) seen[idx(nx, ny)] = now;
-          }
-        }
+    for (let i = 0; i < dist.length; i++) {
+      if (dist[i] >= 0 && dist[i] <= radius) lightCell(i, now);
+    }
+  }
+
+  function advanceWave(now) {
+    if (!wave) return;
+    while (wave.step < wave.layers.length) {
+      const at = wave.start + wave.step * WAVE_STEP;
+      if (at > now) return;
+      for (const i of wave.layers[wave.step]) {
+        lightCell(i, at);
+        echoLit[i] = at;
       }
+      wave.step++;
+    }
+    wave = null;
+  }
+
+  function playEcho() {
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    if (!Audio) return;
+    try {
+      audio = audio || new Audio();
+      if (audio.state === 'suspended') audio.resume().catch(() => {});
+      const now = audio.currentTime;
+      for (const [delay, volume] of [[0, 0.09], [0.16, 0.035]]) {
+        const tone = audio.createOscillator(), gain = audio.createGain();
+        const start = now + delay, end = start + 0.14;
+        tone.frequency.setValueAtTime(680, start);
+        tone.frequency.exponentialRampToValueAtTime(490, end);
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(volume, start + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, end);
+        tone.connect(gain).connect(audio.destination);
+        tone.onended = () => { tone.disconnect(); gain.disconnect(); };
+        tone.start(start);
+        tone.stop(end);
+      }
+    } catch {
+      // Visual feedback still works if the browser has no available audio device.
     }
   }
 
@@ -191,14 +228,20 @@
     const now = performance.now();
     if (now - lastPing < COOLDOWN) return;
     lastPing = now;
-    pingT = now;
-    pingAt = {x: player.x, y: player.y};
-    reveal(player.x, player.y, PING_R);
-    // 听者被惊动
-    for (const e of enemies) {
-      const d = Math.abs(e.x - player.x) + Math.abs(e.y - player.y);
-      if (d <= PING_R * 2) e.target = {x: player.x, y: player.y};
+    advanceWave(now);
+    const dist = bfsDist(player.x, player.y);
+    const layers = Array.from({length: PING_R + 1}, () => []);
+    for (let i = 0; i < dist.length; i++) {
+      if (dist[i] >= 0 && dist[i] <= PING_R) layers[dist[i]].push(i);
     }
+    wave = {start: now, layers, step: 0};
+    for (const e of enemies) {
+      const d = dist[idx(e.x, e.y)];
+      if (d >= 0 && d <= PING_R * 2) {
+        e.sound = {at: now + d * WAVE_STEP, x: player.x, y: player.y};
+      }
+    }
+    playEcho();
     draw();
   }
 
@@ -239,6 +282,10 @@
   // ---------- 敌人 ----------
   function stepEnemies(now) {
     for (const e of enemies) {
+      if (e.sound && now >= e.sound.at) {
+        e.target = {x: e.sound.x, y: e.sound.y};
+        e.sound = null;
+      }
       if (now < e.next) continue;
       e.next = now + ENEMY_STEP;
       let tx = e.target ? e.target.x : null, ty = e.target ? e.target.y : null;
@@ -261,20 +308,23 @@
       }
       e.x = nx; e.y = ny;
       if (caught()) return;
-      if (e.target && Math.abs(e.x - e.target.x) + Math.abs(e.y - e.target.y) <= 1) e.target = null;
+      if (e.target && e.x === e.target.x && e.y === e.target.y) {
+        e.target = null;
+        e.next = now + 1200;
+      }
     }
   }
 
   // ---------- 渲染 ----------
   function alphaOf(i, now) {
     const t = seen[i];
-    if (!t) return 0;
     const a = 1 - (now - t) / FADE;
     return a > 0 ? a : 0;
   }
 
   function draw() {
     const now = performance.now();
+    advanceWave(now);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#04060a';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -295,6 +345,12 @@
           ctx.globalAlpha = a * 0.35;
           ctx.fillStyle = '#0c1119';
           ctx.fillRect(px + 1, py + 1, CELL - 2, CELL - 2);
+          const pulse = Math.max(0, 1 - (now - echoLit[idx(x, y)]) / 420);
+          if (pulse > 0) {
+            ctx.globalAlpha = 0.42 * pulse;
+            ctx.fillStyle = '#4de2ff';
+            ctx.fillRect(px + 1, py + 1, CELL - 2, CELL - 2);
+          }
         }
       }
     }
@@ -349,17 +405,6 @@
       ctx.shadowColor = '#9fdcff'; ctx.shadowBlur = 12;
       ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI*2); ctx.fill();
       ctx.shadowBlur = 0;
-    }
-
-    // 回声波纹
-    const age = now - pingT;
-    if (age >= 0 && age < 900) {
-      const r = (age / 900) * PING_R * CELL;
-      ctx.globalAlpha = (1 - age / 900) * 0.5;
-      ctx.strokeStyle = '#4de2ff';
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(pingAt.x*CELL + CELL/2, pingAt.y*CELL + CELL/2, r, 0, Math.PI*2); ctx.stroke();
-      ctx.globalAlpha = 1;
     }
 
     if (state === 'win') overlay('你走了出去', '按 R 再来一次', '#4dffa6');
