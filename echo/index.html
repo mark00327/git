@@ -30,6 +30,7 @@
 <body>
 <div class="wrap">
   <div class="hud">
+    <span>碎片 <b id="frag">0</b>/3</span>
     <div class="row">回声 <div class="bar"><i id="cd"></i></div></div>
   </div>
   <canvas id="c" width="588" height="420"></canvas>
@@ -44,6 +45,7 @@
   const COLS = 21, ROWS = 15, CELL = 28, RADIUS = 9;
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
+  const fragEl = document.getElementById('frag');
   const cdEl = document.getElementById('cd');
 
   const idx = (x, y) => y * COLS + x;
@@ -52,6 +54,7 @@
   let maze, player, lastMove;
   let seen, lastPing, pingT, pingAt;
   const COOLDOWN = 1800, PING_R = 9, FADE = 2600;
+  let exitCell, frags, collected, state;
 
   // ---------- 迷宫（递归回溯） ----------
   function genMaze() {
@@ -106,15 +109,39 @@
     return dist;
   }
 
+  function openCells() {
+    const out = [];
+    for (let y = 1; y < ROWS - 1; y++)
+      for (let x = 1; x < COLS - 1; x++)
+        if (maze[idx(x, y)] === 0) out.push({x, y});
+    return out;
+  }
+
   // ---------- 初始化 ----------
   function reset() {
     maze = genMaze();
     seen = new Float32Array(COLS * ROWS);
     player = {x: 1, y: 1};
+    exitCell = {x: COLS - 2, y: ROWS - 2};
+
+    const cells = openCells().filter(c => !(c.x === 1 && c.y === 1) &&
+      !(c.x === exitCell.x && c.y === exitCell.y) &&
+      Math.abs(c.x - 1) + Math.abs(c.y - 1) > 5);
+
+    frags = [];
+    for (let i = 0; i < 3 && cells.length; i++) {
+      const k = Math.floor(Math.random() * cells.length);
+      const c = cells.splice(k, 1)[0];
+      frags.push({x: c.x, y: c.y, got: false});
+    }
+
+    collected = 0;
+    state = 'play';
     pingT = -9999;
     pingAt = {x: 1, y: 1};
     lastPing = -9999;
     lastMove = 0;
+    fragEl.textContent = '0';
     reveal(player.x, player.y, 3.2);
     draw();
   }
@@ -150,6 +177,7 @@
 
   // ---------- 玩家 ----------
   function tryMove(dx, dy) {
+    if (state !== 'play') return;
     const now = performance.now();
     if (now - lastMove < 90) return;
     lastMove = now;
@@ -158,6 +186,16 @@
     if (maze[idx(nx, ny)] !== 0) return;
     player.x = nx; player.y = ny;
     reveal(nx, ny, 2.2);
+
+    for (const f of frags) {
+      if (!f.got && f.x === nx && f.y === ny) {
+        f.got = true; collected++;
+        fragEl.textContent = String(collected);
+      }
+    }
+    if (collected === 3 && nx === exitCell.x && ny === exitCell.y) {
+      state = 'win';
+    }
     draw();
   }
 
@@ -196,6 +234,34 @@
     }
     ctx.globalAlpha = 1;
 
+    // 出口
+    {
+      const a = alphaOf(idx(exitCell.x, exitCell.y), now);
+      if (a > 0) {
+        ctx.globalAlpha = a;
+        ctx.strokeStyle = '#4dffa6';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(exitCell.x*CELL+5, exitCell.y*CELL+5, CELL-10, CELL-10);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // 碎片
+    for (const f of frags) {
+      if (f.got) continue;
+      const a = alphaOf(idx(f.x, f.y), now);
+      if (a <= 0) continue;
+      const cx = f.x*CELL + CELL/2, cy = f.y*CELL + CELL/2;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#4de2ff';
+      ctx.shadowColor = '#4de2ff'; ctx.shadowBlur = 14;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 7); ctx.lineTo(cx + 6, cy); ctx.lineTo(cx, cy + 7); ctx.lineTo(cx - 6, cy);
+      ctx.closePath(); ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+    }
+
     // 玩家
     {
       const cx = player.x*CELL + CELL/2, cy = player.y*CELL + CELL/2;
@@ -216,6 +282,19 @@
       ctx.globalAlpha = 1;
     }
 
+    if (state === 'win') overlay('你走了出去', '按 R 再来一次', '#4dffa6');
+  }
+
+  function overlay(title, sub, color) {
+    ctx.fillStyle = 'rgba(4,6,10,.78)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = color;
+    ctx.font = 'bold 34px "Microsoft YaHei", sans-serif';
+    ctx.fillText(title, canvas.width/2, canvas.height/2 - 8);
+    ctx.fillStyle = '#8fa3bd';
+    ctx.font = '15px "Microsoft YaHei", sans-serif';
+    ctx.fillText(sub, canvas.width/2, canvas.height/2 + 28);
   }
 
   // ---------- 主循环 ----------
@@ -237,7 +316,7 @@
     W:[0,-1], S:[0,1], A:[-1,0], D:[1,0]
   };
   window.addEventListener('keydown', (e) => {
-    if (e.key === ' ') { e.preventDefault(); doPing(); return; }
+    if (e.key === ' ') { e.preventDefault(); if (state === 'play') doPing(); return; }
     if (e.key === 'r' || e.key === 'R') { reset(); return; }
     const m = map[e.key];
     if (m) { e.preventDefault(); tryMove(m[0], m[1]); }
