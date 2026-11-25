@@ -203,6 +203,12 @@
   }
 
   // ---------- 玩家 ----------
+  function caught() {
+    if (!enemies.some(e => e.x === player.x && e.y === player.y)) return false;
+    state = 'lose';
+    return true;
+  }
+
   function tryMove(dx, dy) {
     if (state !== 'play') return;
     const now = performance.now();
@@ -212,6 +218,10 @@
     if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) return;
     if (maze[idx(nx, ny)] !== 0) return;
     player.x = nx; player.y = ny;
+    if (caught()) {
+      draw();
+      return;
+    }
     reveal(nx, ny, 2.2);
 
     for (const f of frags) {
@@ -250,7 +260,7 @@
         }
       }
       e.x = nx; e.y = ny;
-      if (nx === player.x && ny === player.y) state = 'lose';
+      if (caught()) return;
       if (e.target && Math.abs(e.x - e.target.x) + Math.abs(e.y - e.target.y) <= 1) e.target = null;
     }
   }
