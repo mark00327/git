@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>回声 · Echo</title>
+<style>
+  :root{
+    --bg:#07090d; --wall:#1b2534; --wallEdge:#2c3b52; --floor:#0c1119;
+    --cyan:#4de2ff; --red:#ff4d6d; --green:#4dffa6; --text:#dfe9f7; --dim:#7d8ea6;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(900px 500px at 50% 0%, #0d1420 0%, var(--bg) 70%);
+    color:var(--text); font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+    display:flex; align-items:center; justify-content:center; user-select:none;
+  }
+  .wrap{padding:18px}
+  .hud{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:14px;color:var(--dim)}
+  .hud b{color:var(--text)}
+  .bar{width:110px;height:6px;border-radius:3px;background:#16202e;overflow:hidden;margin-left:8px}
+  .bar i{display:block;height:100%;width:0;background:var(--cyan);transition:width .08s linear}
+  .row{display:flex;align-items:center;gap:6px}
+  canvas{display:block;border-radius:12px;background:#04060a;box-shadow:0 20px 50px rgba(0,0,0,.6),inset 0 0 0 1px #152033}
+  .tips{margin-top:10px;font-size:12.5px;color:var(--dim);display:flex;gap:14px;flex-wrap:wrap}
+  kbd{background:#131b28;border:1px solid #223148;border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-size:12px;color:#a9bcd6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="c" width="588" height="420"></canvas>
+  <div class="tips">
+    <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>/方向键 移动</span>
+    <span><kbd>R</kbd> 重开</span>
+  </div>
+</div>
+<script>
+(() => {
+  const COLS = 21, ROWS = 15, CELL = 28, RADIUS = 9;
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  const idx = (x, y) => y * COLS + x;
+  const inside = (x, y) => x > 0 && y > 0 && x < COLS - 1 && y < ROWS - 1;
+
+  let maze, player, lastMove;
+
+  // ---------- 迷宫（递归回溯） ----------
+  function genMaze() {
+    const m = new Uint8Array(COLS * ROWS).fill(1);
+    const stack = [[1, 1]];
+    m[idx(1, 1)] = 0;
+    while (stack.length) {
+      const [x, y] = stack[stack.length - 1];
+      const dirs = [[2,0],[-2,0],[0,2],[0,-2]].sort(() => Math.random() - 0.5);
+      let moved = false;
+      for (const [dx, dy] of dirs) {
+        const nx = x + dx, ny = y + dy;
+        if (!inside(nx, ny)) continue;
+        if (m[idx(nx, ny)] === 1) {
+          m[idx(x + dx/2, y + dy/2)] = 0;
+          m[idx(nx, ny)] = 0;
+          stack.push([nx, ny]);
+          moved = true;
+          break;
+        }
+      }
+      if (!moved) stack.pop();
+    }
+    // 打通一些墙，制造环路（避免死胡同太多，敌人可包抄）
+    for (let y = 1; y < ROWS - 1; y++) {
+      for (let x = 1; x < COLS - 1; x++) {
+        if (m[idx(x, y)] !== 1) continue;
+        const h = m[idx(x - 1, y)] === 0 && m[idx(x + 1, y)] === 0;
+        const v = m[idx(x, y - 1)] === 0 && m[idx(x, y + 1)] === 0;
+        if ((h || v) && Math.random() < 0.14) m[idx(x, y)] = 0;
+      }
+    }
+    return m;
+  }
+
+  // ---------- 初始化 ----------
+  function reset() {
+    maze = genMaze();
+    player = {x: 1, y: 1};
+    lastMove = 0;
+    draw();
+  }
+  // ---------- 玩家 ----------
+  function tryMove(dx, dy) {
+    const now = performance.now();
+    if (now - lastMove < 90) return;
+    lastMove = now;
+    const nx = player.x + dx, ny = player.y + dy;
+    if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) return;
+    if (maze[idx(nx, ny)] !== 0) return;
+    player.x = nx; player.y = ny;
+    draw();
+  }
+
+  // ---------- 渲染 ----------
+  function draw() {
+    const now = performance.now();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#04060a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        const a = 1;
+        const px = x * CELL, py = y * CELL;
+        if (maze[idx(x, y)] === 1) {
+          ctx.globalAlpha = a * 0.95;
+          ctx.fillStyle = '#1b2534';
+          ctx.fillRect(px + 1, py + 1, CELL - 2, CELL - 2);
+          ctx.globalAlpha = a * 0.5;
+          ctx.strokeStyle = '#2c3b52';
+          ctx.strokeRect(px + 1.5, py + 1.5, CELL - 3, CELL - 3);
+        } else {
+          ctx.globalAlpha = a * 0.35;
+          ctx.fillStyle = '#0c1119';
+          ctx.fillRect(px + 1, py + 1, CELL - 2, CELL - 2);
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // 玩家
+    {
+      const cx = player.x*CELL + CELL/2, cy = player.y*CELL + CELL/2;
+      ctx.fillStyle = '#eaf6ff';
+      ctx.shadowColor = '#9fdcff'; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI*2); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+  }
+
+  // ---------- 输入 ----------
+  const map = {
+    ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0],
+    w:[0,-1], s:[0,1], a:[-1,0], d:[1,0],
+    W:[0,-1], S:[0,1], A:[-1,0], D:[1,0]
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') { reset(); return; }
+    const m = map[e.key];
+    if (m) { e.preventDefault(); tryMove(m[0], m[1]); }
+  });
+
+  reset();
+})();
+</script>
+</body>
+</html>
